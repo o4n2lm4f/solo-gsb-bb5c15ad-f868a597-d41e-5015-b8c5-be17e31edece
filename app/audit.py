@@ -94,6 +94,37 @@ def _intersect(a: ParsedEvent, b: ParsedEvent) -> Optional[tuple[datetime, Optio
     return lo, hi
 
 
+def build_handover_pairs(events: list[dict[str, Any]]) -> list[tuple[ParsedEvent, ParsedEvent]]:
+    """按审计排序（起始时间）生成相邻交接事件对。
+
+    与审计链路使用同一过滤规则：跳过无法解析的时间，起止倒置的事件不参与。
+    返回的每一对 (prev, cur) 即一个“交接项”，prev 为交出方、cur 为接收方。
+    """
+    valid: list[ParsedEvent] = []
+    for ev in events:
+        try:
+            start = parse_dt(ev["start_time"])
+            end = parse_dt(ev.get("end_time"))
+        except ValueError:
+            continue
+        if start is None:
+            continue
+        valid.append(
+            ParsedEvent(
+                id=ev["id"],
+                custodian=ev["custodian"],
+                start=start,
+                end=end,
+                note=ev.get("note") or "",
+                seq=ev["seq"],
+                raw_end=ev.get("end_time"),
+            )
+        )
+    by_start = sorted(valid, key=lambda e: (e.start, e.id))
+    chain = [e for e in by_start if not (e.end is not None and e.end < e.start)]
+    return list(zip(chain, chain[1:]))
+
+
 def build_audit(events: list[dict[str, Any]]) -> dict[str, Any]:
     """对单一样本的事件列表执行审计。
 

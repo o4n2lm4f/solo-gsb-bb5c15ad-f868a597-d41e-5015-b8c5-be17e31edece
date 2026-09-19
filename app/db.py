@@ -77,6 +77,34 @@ CREATE TABLE IF NOT EXISTS signoffs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_signoffs_sample ON signoffs(sample_id);
+
+-- 双向交接确认：from/to_event_id 故意不做外键——事件被删除后，
+-- 失效确认记录仍需保留供追溯（样本删除则级联清理）。
+CREATE TABLE IF NOT EXISTS handover_confirmations (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    sample_id      INTEGER NOT NULL REFERENCES samples(id) ON DELETE CASCADE,
+    pair_key       TEXT    NOT NULL,
+    from_event_id  INTEGER NOT NULL,
+    to_event_id    INTEGER NOT NULL,
+    event_digest   TEXT    NOT NULL,
+    event_summary  TEXT    NOT NULL,
+    time_match     INTEGER NOT NULL DEFAULT 0,
+    out_name       TEXT,
+    out_at         TEXT,
+    in_name        TEXT,
+    in_at          TEXT,
+    status         TEXT    NOT NULL DEFAULT 'pending',
+    invalid_reason TEXT,
+    invalidated_at TEXT,
+    created_at     TEXT    NOT NULL,
+    updated_at     TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_handovers_sample ON handover_confirmations(sample_id);
+
+-- 同一交接项同一时间只允许一条有效（非失效）确认记录
+CREATE UNIQUE INDEX IF NOT EXISTS idx_handovers_active_pair
+    ON handover_confirmations(sample_id, pair_key) WHERE status != 'invalid';
 """
 
 

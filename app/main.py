@@ -1,4 +1,4 @@
-"""FastAPI 入口：样本 / 交接事件 CRUD、审计、结论签署与报告导出。"""
+"""FastAPI 入口：样本 / 交接事件 CRUD、审计、结论签署、双向交接确认与报告导出。"""
 from __future__ import annotations
 
 import hashlib
@@ -14,10 +14,11 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlite3 import Connection
 
+from . import handover
 from .audit import build_audit
 from .db import get_conn, init_db
 from .report import build_html, build_json, build_markdown
-from .schemas import EventCreate, SampleCreate, SignoffCreate, SignoffRevoke
+from .schemas import EventCreate, HandoverConfirm, SampleCreate, SignoffCreate, SignoffRevoke
 
 
 @asynccontextmanager
@@ -27,7 +28,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="样本交接链路审计", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="样本交接链路审计", version="1.1.0", lifespan=lifespan)
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
@@ -111,6 +112,7 @@ def get_sample(sample_id: int, conn: Connection = Depends(get_conn)) -> dict[str
         "events": events,
         "audit": audit,
         "signoffs": _list_signoffs(conn, sample_id),
+        "handovers": handover.list_handovers(conn, sample_id, events),
     }
 
 
@@ -137,6 +139,8 @@ def add_event(
         "VALUES (?, ?, ?, ?, ?, ?)",
         (sample_id, payload.custodian, payload.start_time, payload.end_time, payload.note, seq),
     )
+    # 新事件可能改变相邻关系，同步失效的交接确认
+    handover.sync_handovers(conn, sample_id, _fetch_events(conn, sample_id))
     conn.commit()
     row = conn.execute("SELECT * FROM events WHERE id = ?", (cur.lastrowid,)).fetchone()
     return {"id": row["id"], "seq": row["seq"]}
@@ -151,6 +155,8 @@ def update_event(event_id: int, payload: EventCreate, conn: Connection = Depends
         "UPDATE events SET custodian = ?, start_time = ?, end_time = ?, note = ? WHERE id = ?",
         (payload.custodian, payload.start_time, payload.end_time, payload.note, event_id),
     )
+    # 事件被编辑后，绑定旧字段摘要的交接确认失效
+    handover.sync_handovers(conn, row["sample_id"], _fetch_events(conn, row["sample_id"]))
     conn.commit()
     return {"id": event_id, "updated": True}
 
@@ -160,7 +166,10 @@ def delete_event(event_id: int, conn: Connection = Depends(get_conn)) -> Respons
     row = conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="交接事件不存在")
+    sample_id = row["sample_id"]
     conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
+    # 事件被删除后，相关交接确认保留为失效记录
+    handover.sync_handovers(conn, sample_id, _fetch_events(conn, sample_id))
     conn.commit()
     return Response(status_code=204)
 
@@ -171,6 +180,42 @@ def delete_event(event_id: int, conn: Connection = Depends(get_conn)) -> Respons
 def get_audit(sample_id: int, conn: Connection = Depends(get_conn)) -> dict[str, Any]:
     _fetch_sample(conn, sample_id)
     return build_audit(_fetch_events(conn, sample_id))
+
+
+# ---------- 双向交接确认 ----------
+
+@app.get("/api/samples/{sample_id}/handovers")
+def list_sample_handovers(sample_id: int, conn: Connection = Depends(get_conn)) -> dict[str, Any]:
+    """交接项列表：按审计排序的相邻事件对 + 确认状态 + 失效记录 + 统计。"""
+    _fetch_sample(conn, sample_id)
+    return handover.list_handovers(conn, sample_id, _fetch_events(conn, sample_id))
+
+
+@app.post("/api/samples/{sample_id}/handovers/confirm")
+def confirm_sample_handover(
+    sample_id: int, payload: HandoverConfirm, conn: Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    """确认交接项的一侧（side=out 交出方 / side=in 接收方）。
+
+    确认绑定两条事件当前的关键字段摘要；任一事件后续被编辑或删除，
+    该确认即失效，需重新确认。
+    """
+    _fetch_sample(conn, sample_id)
+    try:
+        item = handover.confirm_handover(
+            conn,
+            sample_id,
+            _fetch_events(conn, sample_id),
+            payload.from_event_id,
+            payload.to_event_id,
+            payload.side,
+            payload.name,
+            payload.confirmed_at,
+        )
+    except handover.HandoverError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    conn.commit()
+    return item
 
 
 # ---------- 结论签署（不可变快照） ----------
@@ -282,19 +327,21 @@ def export_report(
     conn: Connection = Depends(get_conn),
 ):
     sample = _fetch_sample(conn, sample_id)
-    audit = build_audit(_fetch_events(conn, sample_id))
+    events = _fetch_events(conn, sample_id)
+    audit = build_audit(events)
     signoffs = _list_signoffs(conn, sample_id)
+    handovers = handover.list_handovers(conn, sample_id, events)
 
     if format == "markdown":
-        body = build_markdown(sample, audit, signoffs)
+        body = build_markdown(sample, audit, signoffs, handovers)
         headers = {"Content-Disposition": f'attachment; filename="{_safe_filename(sample["code"], "md")}"'}
         return PlainTextResponse(content=body, media_type="text/markdown; charset=utf-8", headers=headers)
     if format == "html":
-        body = build_html(sample, audit, signoffs)
+        body = build_html(sample, audit, signoffs, handovers)
         headers = {"Content-Disposition": f'attachment; filename="{_safe_filename(sample["code"], "html")}"'}
         return HTMLResponse(content=body, media_type="text/html; charset=utf-8", headers=headers)
 
-    body = build_json(sample, audit, signoffs)
+    body = build_json(sample, audit, signoffs, handovers)
     headers = {"Content-Disposition": f'attachment; filename="{_safe_filename(sample["code"], "json")}"'}
     return Response(content=body, media_type="application/json; charset=utf-8", headers=headers)
 

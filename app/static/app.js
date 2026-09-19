@@ -76,6 +76,8 @@
     out_of_order: "逆序录入", bad_time: "时间错误",
   };
   const SIGNOFF_STATUS_LABEL = { active: "已签署", revoked: "已撤销" };
+  const HO_STATUS_LABEL = { pending: "待确认", confirmed: "已确认", mismatch: "时间不一致" };
+  const HO_STATUS_BADGE = { pending: "badge-warning", confirmed: "badge-pass", mismatch: "badge-fail" };
 
   // ---------- 样本列表 ----------
 
@@ -136,6 +138,7 @@
     renderAudit();
     renderTimeline();
     renderEvents();
+    renderHandovers();
     renderSignoffs();
     resetForm();
   }
@@ -405,6 +408,128 @@
       state.currentId = null;
       await loadSamples();
       showEmpty();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  // ---------- 双向交接确认 ----------
+
+  function hoPartyLabel(e) {
+    return `#${e.id} ${e.custodian}（${e.start_time} ~ ${e.end_time || "仍在保管"}）`;
+  }
+
+  function hoSideHtml(side, title, name, at) {
+    if (name) {
+      return `
+      <div class="ho-side ho-done">
+        <div class="ho-side-title">${title}</div>
+        <div class="ho-confirmed">✓ ${esc(name)}<span class="ho-at">${esc(at || "")}</span></div>
+      </div>`;
+    }
+    return `
+    <div class="ho-side" data-side="${side}">
+      <div class="ho-side-title">${title}</div>
+      <div class="ho-form">
+        <input type="text" class="ho-name" maxlength="64" placeholder="确认人姓名" />
+        <input type="datetime-local" class="ho-time" step="1" value="${nowLocalInput()}" />
+        <button class="btn btn-small btn-primary" data-act="confirm">确认</button>
+      </div>
+    </div>`;
+  }
+
+  function handoverItemHtml(it) {
+    const c = it.confirmation || {};
+    const badge = `<span class="badge ${HO_STATUS_BADGE[it.status]}">${HO_STATUS_LABEL[it.status]}</span>`;
+    const timeCls = it.time_match ? "ok" : "warn";
+    return `
+    <div class="ho-item" data-from="${it.from_event.id}" data-to="${it.to_event.id}">
+      <div class="ho-head">
+        <div class="ho-pair">
+          <span class="ho-party">#${it.from_event.id} ${esc(it.from_event.custodian)}</span>
+          <span class="ho-range">${esc(it.from_event.start_time)} ~ ${it.from_event.open ? "仍在保管" : esc(it.from_event.end_time)}</span>
+          <span class="ho-arrow">→</span>
+          <span class="ho-party">#${it.to_event.id} ${esc(it.to_event.custodian)}</span>
+          <span class="ho-range">${esc(it.to_event.start_time)} ~ ${it.to_event.open ? "仍在保管" : esc(it.to_event.end_time)}</span>
+        </div>
+        ${badge}
+      </div>
+      <div class="ho-meta"><span class="ho-time-note ${timeCls}">${it.time_match ? "✓" : "⚠"} ${esc(it.time_note)}</span></div>
+      <div class="ho-sides">
+        ${hoSideHtml("out", "交出方确认", c.out_name, c.out_at)}
+        ${hoSideHtml("in", "接收方确认", c.in_name, c.in_at)}
+      </div>
+    </div>`;
+  }
+
+  function renderHandovers() {
+    const ho = state.data.handovers || { items: [], invalid: [], summary: {} };
+    const sum = ho.summary || {};
+    const stat = (num, lbl, cls = "") =>
+      `<div class="stat ${cls}"><div class="num">${num}</div><div class="lbl">${lbl}</div></div>`;
+    $("#handover-stats").innerHTML = [
+      stat(sum.total ?? 0, "交接项"),
+      stat(sum.confirmed ?? 0, "已确认", sum.confirmed ? "ok" : ""),
+      stat(sum.pending ?? 0, "待确认", sum.pending ? "warn" : ""),
+      stat(sum.mismatch ?? 0, "时间不一致", sum.mismatch ? "bad" : ""),
+      stat(sum.invalid ?? 0, "已失效", sum.invalid ? "bad" : ""),
+    ].join("");
+
+    const list = $("#handover-list");
+    if (!ho.items.length) {
+      list.innerHTML = `<div class="ho-empty">交接事件不足两段，暂无交接项；登记相邻交接事件后可在此进行双向确认。</div>`;
+    } else {
+      list.innerHTML = ho.items.map(handoverItemHtml).join("");
+    }
+
+    const invWrap = $("#handover-invalid-wrap");
+    if (!ho.invalid.length) {
+      invWrap.hidden = true;
+      return;
+    }
+    invWrap.hidden = false;
+    $("#handover-invalid-tbody").innerHTML = ho.invalid
+      .map((r, i) => {
+        const side = (name, at) =>
+          name ? `✓ ${esc(name)}<div class="muted-cell">${esc(at || "")}</div>` : "未确认";
+        return `
+        <tr class="ho-invalid-row">
+          <td class="col-ord">${i + 1}</td>
+          <td>${esc(hoPartyLabel(r.from_event))} → ${esc(hoPartyLabel(r.to_event))}</td>
+          <td>${side(r.out_name, r.out_at)}</td>
+          <td>${side(r.in_name, r.in_at)}</td>
+          <td><span class="badge badge-empty">已失效</span><div class="muted-cell">${esc(r.invalid_reason || "")}</div></td>
+          <td>${esc(r.invalidated_at || "—")}</td>
+        </tr>`;
+      })
+      .join("");
+  }
+
+  // 确认某一侧（事件委托）
+  $("#handover-list").addEventListener("click", async (e) => {
+    const btn = e.target.closest('button[data-act="confirm"]');
+    if (!btn) return;
+    const item = btn.closest(".ho-item");
+    const sideBox = btn.closest(".ho-side");
+    const name = sideBox.querySelector(".ho-name").value.trim();
+    const confirmed_at = sideBox.querySelector(".ho-time").value;
+    if (!name || !confirmed_at) {
+      toast("请填写确认人姓名与确认时间", true);
+      return;
+    }
+    try {
+      await api(`/api/samples/${state.currentId}/handovers/confirm`, {
+        method: "POST",
+        body: JSON.stringify({
+          from_event_id: Number(item.dataset.from),
+          to_event_id: Number(item.dataset.to),
+          side: sideBox.dataset.side,
+          name,
+          confirmed_at,
+        }),
+      });
+      toast("已确认，交接状态已更新");
+      await refresh();
     } catch (err) {
       toast(err.message, true);
     }

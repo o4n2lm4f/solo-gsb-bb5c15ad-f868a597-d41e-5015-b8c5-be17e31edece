@@ -107,3 +107,37 @@ class SignoffRevoke(BaseModel):
         if not v:
             raise ValueError("撤销原因不能为空")
         return v
+
+
+class HandoverConfirm(BaseModel):
+    """双向交接确认：对相邻事件对的某一侧（交出方 / 接收方）进行确认。"""
+
+    from_event_id: int
+    to_event_id: int
+    side: str
+    name: str = Field(..., min_length=1, max_length=64)
+    confirmed_at: str
+
+    @field_validator("side")
+    @classmethod
+    def _check_side(cls, v: str) -> str:
+        v = v.strip()
+        if v not in ("out", "in"):
+            raise ValueError("side 必须为 out（交出方）或 in（接收方）")
+        return v
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("确认人姓名不能为空")
+        return v
+
+    @field_validator("confirmed_at")
+    @classmethod
+    def _norm_confirmed_at(cls, v: str) -> str:
+        normalized = _normalize_time(v, "确认时间")
+        if normalized is None:
+            raise ValueError("确认时间不能为空")
+        return normalized

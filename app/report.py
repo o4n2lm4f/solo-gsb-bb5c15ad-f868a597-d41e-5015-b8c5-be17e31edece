@@ -28,16 +28,34 @@ SIGNOFF_STATUS_TEXT = {
     "revoked": "已撤销",
 }
 
+HANDOVER_STATUS_TEXT = {
+    "pending": "待确认",
+    "confirmed": "已确认",
+    "mismatch": "时间不一致",
+    "invalid": "已失效",
+}
+
 
 def _md_cell(text: Any) -> str:
     """转义 Markdown 表格单元格中的竖线。"""
     return str(text if text not in (None, "") else "—").replace("|", "\\|")
 
 
+def _party_label(ev: dict[str, Any]) -> str:
+    """交接方展示标签：经手人（起始 ~ 结束/仍在保管）。"""
+    end = ev.get("end_time") or "仍在保管"
+    return f"{ev.get('custodian', '')}（{ev.get('start_time', '')} ~ {end}）"
+
+
+def _confirm_label(name: Any, at: Any) -> str:
+    return f"{name} {at}" if name else "未确认"
+
+
 def build_markdown(
     sample: dict[str, Any],
     audit: dict[str, Any],
     signoffs: list[dict[str, Any]] | None = None,
+    handovers: dict[str, Any] | None = None,
 ) -> str:
     s = audit["summary"]
     lines = [
@@ -83,8 +101,49 @@ def build_markdown(
     else:
         lines += ["_暂无交接事件。_", ""]
 
+    lines += _handover_markdown(handovers)
     lines += _signoff_markdown(signoffs)
     return "\n".join(lines)
+
+
+def _handover_markdown(handovers: dict[str, Any] | None) -> list[str]:
+    lines = ["## 双向交接确认", ""]
+    ho = handovers or {}
+    items = ho.get("items", [])
+    invalid = ho.get("invalid", [])
+    if not items and not invalid:
+        return lines + ["_暂无交接项（交接事件不足两段）。_", ""]
+    if items:
+        lines += [
+            "| # | 交出方（时段） | 接收方（时段） | 时间衔接 | 交出方确认 | 接收方确认 | 状态 |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+        ]
+        for i, it in enumerate(items, 1):
+            c = it.get("confirmation") or {}
+            status = HANDOVER_STATUS_TEXT.get(it["status"], it["status"])
+            lines.append(
+                f"| {i} | {_md_cell(_party_label(it['from_event']))} | "
+                f"{_md_cell(_party_label(it['to_event']))} | {_md_cell(it['time_note'])} | "
+                f"{_md_cell(_confirm_label(c.get('out_name'), c.get('out_at')))} | "
+                f"{_md_cell(_confirm_label(c.get('in_name'), c.get('in_at')))} | {status} |"
+            )
+        lines.append("")
+    if invalid:
+        lines += [
+            "### 失效确认记录（原确认保留追溯，不计入有效状态，需重新确认）",
+            "",
+            "| 交接项（确认时摘要） | 交出方确认 | 接收方确认 | 失效原因 | 失效时间 |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for r in invalid:
+            pair = f"{_party_label(r['from_event'])} → {_party_label(r['to_event'])}"
+            lines.append(
+                f"| {_md_cell(pair)} | {_md_cell(_confirm_label(r.get('out_name'), r.get('out_at')))} | "
+                f"{_md_cell(_confirm_label(r.get('in_name'), r.get('in_at')))} | "
+                f"{_md_cell(r.get('invalid_reason'))} | {_md_cell(r.get('invalidated_at'))} |"
+            )
+        lines.append("")
+    return lines
 
 
 def _signoff_markdown(signoffs: list[dict[str, Any]] | None) -> list[str]:
@@ -114,6 +173,7 @@ def build_html(
     sample: dict[str, Any],
     audit: dict[str, Any],
     signoffs: list[dict[str, Any]] | None = None,
+    handovers: dict[str, Any] | None = None,
 ) -> str:
     s = audit["summary"]
     status_class = {"pass": "ok", "warning": "warn", "fail": "bad", "empty": "muted"}.get(
@@ -165,6 +225,52 @@ def build_html(
         )
     if not signoff_rows:
         signoff_rows = "<tr><td colspan='7' class='muted'>尚未有任何签署记录。</td></tr>"
+
+    ho = handovers or {}
+    handover_rows = ""
+    for i, it in enumerate(ho.get("items", []), 1):
+        c = it.get("confirmation") or {}
+        out_txt = (
+            f"{html.escape(c['out_name'])}<br><span class='muted'>{html.escape(c['out_at'] or '')}</span>"
+            if c.get("out_name")
+            else "<span class='muted'>未确认</span>"
+        )
+        in_txt = (
+            f"{html.escape(c['in_name'])}<br><span class='muted'>{html.escape(c['in_at'] or '')}</span>"
+            if c.get("in_name")
+            else "<span class='muted'>未确认</span>"
+        )
+        st = it["status"]
+        st_cls = {"confirmed": "ok", "pending": "warn", "mismatch": "bad"}.get(st, "muted")
+        handover_rows += (
+            f"<tr><td>{i}</td>"
+            f"<td>{html.escape(_party_label(it['from_event']))}</td>"
+            f"<td>{html.escape(_party_label(it['to_event']))}</td>"
+            f"<td>{html.escape(it['time_note'])}</td>"
+            f"<td>{out_txt}</td><td>{in_txt}</td>"
+            f"<td><span class='status {st_cls}'>{HANDOVER_STATUS_TEXT.get(st, st)}</span></td></tr>"
+        )
+    if not handover_rows:
+        handover_rows = "<tr><td colspan='7' class='muted'>暂无交接项（交接事件不足两段）。</td></tr>"
+
+    invalid_block = ""
+    invalid_items = ho.get("invalid", [])
+    if invalid_items:
+        invalid_rows = ""
+        for r in invalid_items:
+            pair = f"{_party_label(r['from_event'])} → {_party_label(r['to_event'])}"
+            invalid_rows += (
+                f"<tr><td>{html.escape(pair)}</td>"
+                f"<td>{html.escape(_confirm_label(r.get('out_name'), r.get('out_at')))}</td>"
+                f"<td>{html.escape(_confirm_label(r.get('in_name'), r.get('in_at')))}</td>"
+                f"<td>{html.escape(r.get('invalid_reason') or '')}</td>"
+                f"<td>{html.escape(r.get('invalidated_at') or '')}</td></tr>"
+            )
+        invalid_block = (
+            "<h2 style='margin-top:16px'>失效确认记录（保留追溯，不计入有效状态，需重新确认）</h2>"
+            "<table><tr><th>交接项（确认时摘要）</th><th>交出方确认</th><th>接收方确认</th>"
+            f"<th>失效原因</th><th>失效时间</th></tr>{invalid_rows}</table>"
+        )
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -232,6 +338,15 @@ def build_html(
     </table>
   </div>
   <div class="card">
+    <h2>双向交接确认</h2>
+    <table>
+      <tr><th>#</th><th>交出方（时段）</th><th>接收方（时段）</th><th>时间衔接</th>
+          <th>交出方确认</th><th>接收方确认</th><th>状态</th></tr>
+      {handover_rows}
+    </table>
+    {invalid_block}
+  </div>
+  <div class="card">
     <h2>结论签署</h2>
     <table>
       <tr><th>签署人</th><th>签署时间</th><th>状态</th><th>签署时审计结论</th>
@@ -248,6 +363,7 @@ def build_json(
     sample: dict[str, Any],
     audit: dict[str, Any],
     signoffs: list[dict[str, Any]] | None = None,
+    handovers: dict[str, Any] | None = None,
 ) -> str:
     return json.dumps(
         {
@@ -255,6 +371,7 @@ def build_json(
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "sample": sample,
             "audit": audit,
+            "handovers": handovers or {"items": [], "invalid": [], "summary": {}},
             "signoffs": signoffs or [],
         },
         ensure_ascii=False,

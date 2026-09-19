@@ -62,6 +62,34 @@
           <ul id="findings" class="findings"></ul>
         </section>
 
+        <!-- 双向交接确认 -->
+        <section class="card">
+          <div class="card-head">
+            <h3>双向交接确认</h3>
+            <span class="head-hint">交出方与接收方分别确认；任一事件被编辑或删除后，原确认失效并需重新确认</span>
+          </div>
+          <div id="handover-stats" class="stats"></div>
+          <div id="handover-list"></div>
+          <div id="handover-invalid-wrap" hidden>
+            <h4 class="sub-head">失效确认记录（仅保留追溯，不计入有效状态，需重新确认）</h4>
+            <div class="table-wrap">
+              <table class="event-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>交接项（确认时摘要）</th>
+                    <th>交出方确认</th>
+                    <th>接收方确认</th>
+                    <th>失效原因</th>
+                    <th>失效时间</th>
+                  </tr>
+                </thead>
+                <tbody id="handover-invalid-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
         <!-- 结论签署 -->
         <section class="card">
           <div class="card-head">
