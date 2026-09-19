@@ -28,6 +28,18 @@ SIGNOFF_STATUS_TEXT = {
     "revoked": "已撤销",
 }
 
+HANDOVER_STATUS_TEXT = {
+    "confirmed": "已确认",
+    "pending": "待确认",
+    "time_mismatch": "时间不一致",
+}
+
+HANDOVER_REASON_TEXT = {
+    "event_edited": "关联事件被编辑，绑定字段已变化",
+    "event_deleted": "关联事件已被删除",
+    "adjacency_changed": "事件新增或调整后两条记录不再相邻",
+}
+
 
 def _md_cell(text: Any) -> str:
     """转义 Markdown 表格单元格中的竖线。"""
@@ -38,6 +50,7 @@ def build_markdown(
     sample: dict[str, Any],
     audit: dict[str, Any],
     signoffs: list[dict[str, Any]] | None = None,
+    handovers: dict[str, Any] | None = None,
 ) -> str:
     s = audit["summary"]
     lines = [
@@ -84,7 +97,70 @@ def build_markdown(
         lines += ["_暂无交接事件。_", ""]
 
     lines += _signoff_markdown(signoffs)
+    lines += _handover_markdown(handovers)
     return "\n".join(lines)
+
+
+def _handover_markdown(handovers: dict[str, Any] | None) -> list[str]:
+    lines = ["## 双向交接确认", ""]
+    if not handovers or not handovers.get("items"):
+        return lines + ["_暂无交接项（至少需要两条按时间相邻的交接事件）。_", ""]
+
+    hs = handovers["summary"]
+    lines += [
+        f"共 {hs['total']} 个交接项：**已确认 {hs['confirmed']}**、"
+        f"待确认 {hs['pending']}、时间不一致 {hs['time_mismatch']}；"
+        f"另有失效历史记录 {hs['invalidated']} 条。",
+        "",
+        "| # | 交出方 | 交出结束时间 | 接收方 | 接收开始时间 | 时间衔接 | 状态 | "
+        "交出确认（姓名 / 时间） | 接收确认（姓名 / 时间） |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for item in handovers["items"]:
+        a, b = item["from_event"], item["to_event"]
+        link = "一致" if item["time_consistent"] else "**不一致**"
+        conf = item.get("confirmation")
+        if conf:
+            from_cell = (
+                f"{conf['from_name']} / {conf['from_confirmed_at']}"
+                if conf["from_name"]
+                else "待确认"
+            )
+            to_cell = (
+                f"{conf['to_name']} / {conf['to_confirmed_at']}"
+                if conf["to_name"]
+                else "待确认"
+            )
+        else:
+            from_cell = to_cell = "待确认"
+        lines.append(
+            f"| {item['index']} | {_md_cell(a['custodian'])} | "
+            f"{_md_cell(a.get('end_time') or '（仍在保管）')} | "
+            f"{_md_cell(b['custodian'])} | {_md_cell(b['start_time'])} | {link} | "
+            f"{HANDOVER_STATUS_TEXT.get(item['status'], item['status'])} | "
+            f"{_md_cell(from_cell)} | {_md_cell(to_cell)} |"
+        )
+    lines.append("")
+
+    history = handovers.get("history") or []
+    if history:
+        lines += [
+            "### 失效的历史确认（不再计入有效状态，需重新确认）",
+            "",
+            "| 交出方 | 接收方 | 交出确认 | 接收确认 | 失效原因 | 失效时间 |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+        for h in history:
+            lines.append(
+                f"| {_md_cell(h.get('from_custodian') or '（事件已删除）')} | "
+                f"{_md_cell(h.get('to_custodian') or '（事件已删除）')} | "
+                f"{_md_cell(h.get('from_name') or '—')} | "
+                f"{_md_cell(h.get('to_name') or '—')} | "
+                f"{HANDOVER_REASON_TEXT.get(h.get('reason'), h.get('reason') or '—')} | "
+                f"{_md_cell(h.get('invalidated_at'))} |"
+            )
+        lines.append("")
+    return lines
 
 
 def _signoff_markdown(signoffs: list[dict[str, Any]] | None) -> list[str]:
@@ -114,6 +190,7 @@ def build_html(
     sample: dict[str, Any],
     audit: dict[str, Any],
     signoffs: list[dict[str, Any]] | None = None,
+    handovers: dict[str, Any] | None = None,
 ) -> str:
     s = audit["summary"]
     status_class = {"pass": "ok", "warning": "warn", "fail": "bad", "empty": "muted"}.get(
@@ -166,6 +243,8 @@ def build_html(
     if not signoff_rows:
         signoff_rows = "<tr><td colspan='7' class='muted'>尚未有任何签署记录。</td></tr>"
 
+    handover_section = _handover_html(handovers)
+
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -198,6 +277,11 @@ def build_html(
   .tag-out_of_order {{ background: #fff6e0; color: #9a6b00; }}
   .tag-bad_time {{ background: #eef1f4; color: #52606d; }}
   .open {{ color: #b7791f; font-weight: 600; }}
+  .hv-confirmed {{ color: #1a7f4b; font-weight: 600; }}
+  .hv-pending {{ color: #616e7c; font-weight: 600; }}
+  .hv-time_mismatch {{ color: #c0392b; font-weight: 600; }}
+  .hv-invalid {{ color: #9a6b00; }}
+  .hv-summary {{ margin-bottom: 10px; font-size: 13px; }}
 </style>
 </head>
 <body>
@@ -239,8 +323,93 @@ def build_html(
       {signoff_rows}
     </table>
   </div>
+  {handover_section}
 </body>
 </html>
+"""
+
+
+def _handover_html(handovers: dict[str, Any] | None) -> str:
+    if not handovers or not handovers.get("items"):
+        return (
+            "<div class='card'><h2>双向交接确认</h2>"
+            "<p class='muted'>暂无交接项（至少需要两条按时间相邻的交接事件）。</p></div>"
+        )
+
+    hs = handovers["summary"]
+    rows_html = ""
+    for item in handovers["items"]:
+        a, b = item["from_event"], item["to_event"]
+        link = (
+            "<span class='hv-confirmed'>一致</span>"
+            if item["time_consistent"]
+            else "<span class='hv-time_mismatch'>不一致</span>"
+        )
+        conf = item.get("confirmation")
+        if conf:
+            from_cell = (
+                f"{html.escape(conf['from_name'])}<br><span class='muted'>"
+                f"{html.escape(conf['from_confirmed_at'])}</span>"
+                if conf["from_name"]
+                else "<span class='muted'>待确认</span>"
+            )
+            to_cell = (
+                f"{html.escape(conf['to_name'])}<br><span class='muted'>"
+                f"{html.escape(conf['to_confirmed_at'])}</span>"
+                if conf["to_name"]
+                else "<span class='muted'>待确认</span>"
+            )
+        else:
+            from_cell = to_cell = "<span class='muted'>待确认</span>"
+        end_a = html.escape(a.get("end_time") or "（仍在保管）")
+        rows_html += (
+            f"<tr><td>{item['index']}</td>"
+            f"<td>{html.escape(a['custodian'])}</td><td>{end_a}</td>"
+            f"<td>{html.escape(b['custodian'])}</td>"
+            f"<td>{html.escape(b['start_time'])}</td><td>{link}</td>"
+            f"<td class='hv-{item['status']}'>"
+            f"{HANDOVER_STATUS_TEXT.get(item['status'], item['status'])}</td>"
+            f"<td>{from_cell}</td><td>{to_cell}</td></tr>"
+        )
+
+    history = handovers.get("history") or []
+    history_html = ""
+    if history:
+        hist_rows = ""
+        for h in history:
+            hist_rows += (
+                f"<tr><td>{html.escape(h.get('from_custodian') or '（事件已删除）')}</td>"
+                f"<td>{html.escape(h.get('to_custodian') or '（事件已删除）')}</td>"
+                f"<td>{html.escape(h.get('from_name') or '—')}</td>"
+                f"<td>{html.escape(h.get('to_name') or '—')}</td>"
+                f"<td>{html.escape(HANDOVER_REASON_TEXT.get(h.get('reason'), h.get('reason') or '—'))}</td>"
+                f"<td>{html.escape(h.get('invalidated_at') or '—')}</td></tr>"
+            )
+        history_html = (
+            "<h2 style='margin-top:18px'>失效的历史确认（不再计入有效状态，需重新确认）</h2>"
+            "<table>"
+            "<tr><th>交出方</th><th>接收方</th><th>交出确认</th><th>接收确认</th>"
+            "<th>失效原因</th><th>失效时间</th></tr>"
+            f"{hist_rows}</table>"
+        )
+
+    return f"""
+  <div class="card">
+    <h2>双向交接确认</h2>
+    <div class="hv-summary">
+      共 {hs['total']} 个交接项：<b class="hv-confirmed">已确认 {hs['confirmed']}</b>、
+      <span class="hv-pending">待确认 {hs['pending']}</span>、
+      <span class="hv-time_mismatch">时间不一致 {hs['time_mismatch']}</span>；
+      另有 <span class="hv-invalid">失效历史记录 {hs['invalidated']} 条</span>。
+    </div>
+    <table>
+      <tr><th>#</th><th>交出方</th><th>交出结束时间</th><th>接收方</th>
+          <th>接收开始时间</th><th>时间衔接</th><th>状态</th>
+          <th>交出确认（姓名 / 时间）</th><th>接收确认（姓名 / 时间）</th></tr>
+      {rows_html}
+    </table>
+    {history_html}
+  </div>
 """
 
 
@@ -248,6 +417,7 @@ def build_json(
     sample: dict[str, Any],
     audit: dict[str, Any],
     signoffs: list[dict[str, Any]] | None = None,
+    handovers: dict[str, Any] | None = None,
 ) -> str:
     return json.dumps(
         {
@@ -256,6 +426,7 @@ def build_json(
             "sample": sample,
             "audit": audit,
             "signoffs": signoffs or [],
+            "handovers": handovers or {"items": [], "history": [], "summary": {}},
         },
         ensure_ascii=False,
         indent=2,

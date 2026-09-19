@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -77,6 +78,33 @@ CREATE TABLE IF NOT EXISTS signoffs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_signoffs_sample ON signoffs(sample_id);
+
+-- 双向交接确认：审计排序中每对相邻事件一条确认记录（多轮确认产生多行）。
+-- from_* 为交出方、to_* 为接收方；事件快照与 digest 在确认当时绑定，
+-- 事件后续被编辑/删除或相邻关系变化时仅置 invalidated，原行保留。
+-- 事件外键不加 ON DELETE CASCADE：删除事件后失效记录仍需可查。
+CREATE TABLE IF NOT EXISTS handovers (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    sample_id            INTEGER NOT NULL REFERENCES samples(id) ON DELETE CASCADE,
+    from_event_id        INTEGER NOT NULL,
+    to_event_id          INTEGER NOT NULL,
+    status               TEXT    NOT NULL DEFAULT 'active',
+    from_name            TEXT,
+    from_confirmed_at    TEXT,
+    to_name              TEXT,
+    to_confirmed_at      TEXT,
+    from_event_snapshot  TEXT    NOT NULL,
+    to_event_snapshot    TEXT    NOT NULL,
+    digest               TEXT    NOT NULL,
+    invalidated_reason   TEXT,
+    invalidated_at       TEXT,
+    created_at           TEXT    NOT NULL,
+    updated_at           TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_handovers_sample ON handovers(sample_id);
+CREATE INDEX IF NOT EXISTS idx_handovers_pair
+    ON handovers(from_event_id, to_event_id);
 """
 
 
@@ -116,26 +144,105 @@ def _seed_demo_data(conn: sqlite3.Connection) -> None:
         # 仍在保管中，未归还
         ("周八（留样柜）", t(5, 15), None, "留样观察中"),
     ]
+    event_ids = []
     for seq, (custodian, start, end, note) in enumerate(rows, start=1):
-        conn.execute(
+        ins = conn.execute(
             "INSERT INTO events (sample_id, custodian, start_time, end_time, note, seq) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (sid, custodian, start, end, note, seq),
         )
+        event_ids.append(ins.lastrowid)
 
     cur = conn.execute(
         "INSERT INTO samples (code, name, description, created_at) VALUES (?, ?, ?, ?)",
         ("SAM-DEMO-002", "演示样本·完整链路", "各段交接无缝衔接，当前仍在保管中", now),
     )
-    sid = cur.lastrowid
+    sid2 = cur.lastrowid
     rows2 = [
         ("张三（采集组）", t(0), t(1), "现场采集"),
         ("李四（运输组）", t(1), t(2, 30), "冷链运输"),
         ("王五（检测组）", t(2, 30), None, "检测中，尚未归还"),
     ]
+    event_ids2 = []
     for seq, (custodian, start, end, note) in enumerate(rows2, start=1):
-        conn.execute(
+        ins = conn.execute(
             "INSERT INTO events (sample_id, custodian, start_time, end_time, note, seq) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (sid, custodian, start, end, note, seq),
+            (sid2, custodian, start, end, note, seq),
         )
+        event_ids2.append(ins.lastrowid)
+
+    _seed_handovers(conn, sid, event_ids, rows, sid2, event_ids2, rows2, now)
+
+
+def _seed_handovers(
+    conn: sqlite3.Connection,
+    sid: int,
+    ids: list[int],
+    rows: list[tuple[str, str, str | None, str]],
+    sid2: int,
+    ids2: list[int],
+    rows2: list[tuple[str, str, str | None, str]],
+    now: str,
+) -> None:
+    """预置双向交接确认演示记录（含一条已失效的历史记录）。"""
+    from .handovers import (
+        ACTIVE,
+        INVALIDATED,
+        REASON_ADJACENCY_CHANGED,
+        event_snapshot,
+        pair_digest,
+    )
+
+    def snapshot(sample_id: int, event_id: int) -> dict:
+        r = conn.execute(
+            "SELECT custodian, start_time, end_time, note FROM events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
+        return event_snapshot(dict(r))
+
+    def insert(sample_id, a, b, from_name, from_at, to_name, to_at,
+               status, invalidated_reason=None, invalidated_at=None):
+        sa, sb = snapshot(sample_id, a), snapshot(sample_id, b)
+        conn.execute(
+            "INSERT INTO handovers (sample_id, from_event_id, to_event_id, status, "
+            "from_name, from_confirmed_at, to_name, to_confirmed_at, "
+            "from_event_snapshot, to_event_snapshot, digest, "
+            "invalidated_reason, invalidated_at, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                sample_id, a, b, status,
+                from_name, from_at, to_name, to_at,
+                json.dumps(sa, ensure_ascii=False), json.dumps(sb, ensure_ascii=False),
+                pair_digest(sa, sb),
+                invalidated_reason, invalidated_at, now, now,
+            ),
+        )
+
+    # 异常链路：按起始时间排序后，孙七（ids[5-1]? 见下）14:15 归还、
+    # 周八 14:15 接手，是唯一时间一致的相邻交接 —— 两侧均已确认
+    e_sun, e_zhou = ids[4], ids[5]
+    insert(
+        sid, e_sun, e_zhou,
+        "孙七", "2026-01-01 14:16:00",
+        "周八", "2026-01-01 14:16:30",
+        ACTIVE,
+    )
+    # 历史失效记录：张三→李四曾在 10:00 完成双向确认，
+    # 赵六的补录事件（ids[2]）插入到两人之间后不再相邻，原确认保留为失效
+    e_zhang, e_li = ids[0], ids[1]
+    insert(
+        sid, e_zhang, e_li,
+        "张三", "2026-01-01 10:01:00",
+        "李四", "2026-01-01 10:01:00",
+        INVALIDATED,
+        invalidated_reason=REASON_ADJACENCY_CHANGED,
+        invalidated_at=now,
+    )
+    # 完整链路：第一段（张三→李四）两侧均已确认；第二段（李四→王五）待确认
+    insert(
+        sid2, ids2[0], ids2[1],
+        "张三", "2026-01-01 10:02:00",
+        "李四", "2026-01-01 10:02:00",
+        ACTIVE,
+    )

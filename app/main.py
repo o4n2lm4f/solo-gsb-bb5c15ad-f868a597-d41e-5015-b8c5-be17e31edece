@@ -16,8 +16,21 @@ from sqlite3 import Connection
 
 from .audit import build_audit
 from .db import get_conn, init_db
+from .handovers import (
+    HandoverError,
+    build_handover_view,
+    confirm_handover,
+    get_handover_record,
+    refresh_handover_validity,
+)
 from .report import build_html, build_json, build_markdown
-from .schemas import EventCreate, SampleCreate, SignoffCreate, SignoffRevoke
+from .schemas import (
+    EventCreate,
+    HandoverConfirm,
+    SampleCreate,
+    SignoffCreate,
+    SignoffRevoke,
+)
 
 
 @asynccontextmanager
@@ -111,6 +124,7 @@ def get_sample(sample_id: int, conn: Connection = Depends(get_conn)) -> dict[str
         "events": events,
         "audit": audit,
         "signoffs": _list_signoffs(conn, sample_id),
+        "handovers": build_handover_view(conn, sample_id),
     }
 
 
@@ -137,6 +151,8 @@ def add_event(
         "VALUES (?, ?, ?, ?, ?, ?)",
         (sample_id, payload.custodian, payload.start_time, payload.end_time, payload.note, seq),
     )
+    # 新事件可能插入到某对相邻事件之间，原确认随之失效（记录保留）
+    refresh_handover_validity(conn, sample_id)
     conn.commit()
     row = conn.execute("SELECT * FROM events WHERE id = ?", (cur.lastrowid,)).fetchone()
     return {"id": row["id"], "seq": row["seq"]}
@@ -151,6 +167,8 @@ def update_event(event_id: int, payload: EventCreate, conn: Connection = Depends
         "UPDATE events SET custodian = ?, start_time = ?, end_time = ?, note = ? WHERE id = ?",
         (payload.custodian, payload.start_time, payload.end_time, payload.note, event_id),
     )
+    # 绑定该事件关键字段的原确认保留为失效记录，需两侧重新确认
+    refresh_handover_validity(conn, row["sample_id"])
     conn.commit()
     return {"id": event_id, "updated": True}
 
@@ -160,7 +178,10 @@ def delete_event(event_id: int, conn: Connection = Depends(get_conn)) -> Respons
     row = conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="交接事件不存在")
+    sample_id = row["sample_id"]
+    # 删除事件后，绑定它的原确认保留为失效记录（行与快照不删）
     conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
+    refresh_handover_validity(conn, sample_id)
     conn.commit()
     return Response(status_code=204)
 
@@ -171,6 +192,50 @@ def delete_event(event_id: int, conn: Connection = Depends(get_conn)) -> Respons
 def get_audit(sample_id: int, conn: Connection = Depends(get_conn)) -> dict[str, Any]:
     _fetch_sample(conn, sample_id)
     return build_audit(_fetch_events(conn, sample_id))
+
+
+# ---------- 双向交接确认 ----------
+
+@app.get("/api/samples/{sample_id}/handovers")
+def list_handovers(sample_id: int, conn: Connection = Depends(get_conn)) -> dict[str, Any]:
+    """交接项（审计排序相邻事件）当前状态 + 失效历史记录。"""
+    _fetch_sample(conn, sample_id)
+    return build_handover_view(conn, sample_id)
+
+
+@app.post("/api/samples/{sample_id}/handovers/confirm", status_code=200)
+def confirm_pair(
+    sample_id: int,
+    from_event_id: int,
+    to_event_id: int,
+    payload: HandoverConfirm,
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """交出方（side=from）或接收方（side=to）填写姓名与确认时间。"""
+    _fetch_sample(conn, sample_id)
+    try:
+        result = confirm_handover(
+            conn,
+            sample_id,
+            from_event_id,
+            to_event_id,
+            payload.side,
+            payload.confirmer_name,
+            payload.confirmed_at,
+        )
+    except HandoverError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    conn.commit()
+    return result
+
+
+@app.get("/api/handovers/{handover_id}")
+def get_handover(handover_id: int, conn: Connection = Depends(get_conn)) -> dict[str, Any]:
+    """确认记录详情：双方确认信息、绑定的事件字段摘要、失效原因。"""
+    try:
+        return get_handover_record(conn, handover_id)
+    except HandoverError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
 
 
 # ---------- 结论签署（不可变快照） ----------
@@ -284,17 +349,18 @@ def export_report(
     sample = _fetch_sample(conn, sample_id)
     audit = build_audit(_fetch_events(conn, sample_id))
     signoffs = _list_signoffs(conn, sample_id)
+    handovers = build_handover_view(conn, sample_id)
 
     if format == "markdown":
-        body = build_markdown(sample, audit, signoffs)
+        body = build_markdown(sample, audit, signoffs, handovers)
         headers = {"Content-Disposition": f'attachment; filename="{_safe_filename(sample["code"], "md")}"'}
         return PlainTextResponse(content=body, media_type="text/markdown; charset=utf-8", headers=headers)
     if format == "html":
-        body = build_html(sample, audit, signoffs)
+        body = build_html(sample, audit, signoffs, handovers)
         headers = {"Content-Disposition": f'attachment; filename="{_safe_filename(sample["code"], "html")}"'}
         return HTMLResponse(content=body, media_type="text/html; charset=utf-8", headers=headers)
 
-    body = build_json(sample, audit, signoffs)
+    body = build_json(sample, audit, signoffs, handovers)
     headers = {"Content-Disposition": f'attachment; filename="{_safe_filename(sample["code"], "json")}"'}
     return Response(content=body, media_type="application/json; charset=utf-8", headers=headers)
 

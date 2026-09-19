@@ -7,9 +7,10 @@
   const state = {
     samples: [],
     currentId: null,
-    data: null, // { sample, events, audit, signoffs }
+    data: null, // { sample, events, audit, signoffs, handovers }
     editingId: null,
     viewSignoffId: null, // 当前弹窗中查看的签署快照 id
+    confirmPair: null,   // 当前确认弹窗对应的交接项 { fromId, toId }
   };
 
   // ---------- 工具 ----------
@@ -76,6 +77,14 @@
     out_of_order: "逆序录入", bad_time: "时间错误",
   };
   const SIGNOFF_STATUS_LABEL = { active: "已签署", revoked: "已撤销" };
+  const HANDOVER_STATUS_LABEL = {
+    confirmed: "已确认", pending: "待确认", time_mismatch: "时间不一致",
+  };
+  const HANDOVER_REASON_LABEL = {
+    event_edited: "关联事件被编辑，绑定字段已变化",
+    event_deleted: "关联事件已被删除",
+    adjacency_changed: "两条记录不再相邻",
+  };
 
   // ---------- 样本列表 ----------
 
@@ -134,6 +143,7 @@
   function renderAll() {
     renderSample();
     renderAudit();
+    renderHandovers();
     renderTimeline();
     renderEvents();
     renderSignoffs();
@@ -282,6 +292,249 @@
         setTimeout(() => (el.style.outline = ""), 1800);
       });
     });
+  });
+
+  // ---------- 双向交接确认 ----------
+
+  function renderHandovers() {
+    const hv = state.data.handovers || { items: [], history: [], summary: {} };
+    const s = hv.summary || {};
+    $("#handover-stats").innerHTML = [
+      statChip(s.total ?? 0, "交接项", ""),
+      statChip(s.confirmed ?? 0, "已确认", "ok"),
+      statChip(s.pending ?? 0, "待确认", "muted"),
+      statChip(s.time_mismatch ?? 0, "时间不一致", "bad"),
+      statChip(s.invalidated ?? 0, "失效历史", "warn"),
+    ].join("");
+
+    const tbody = $("#handover-tbody");
+    if (!hv.items || !hv.items.length) {
+      tbody.innerHTML = `<tr><td colspan="6" class="muted-cell" style="text-align:center;padding:22px">至少需要两条按时间相邻的交接事件才会生成交接项</td></tr>`;
+    } else {
+      tbody.innerHTML = hv.items.map((item) => renderHandoverRow(item)).join("");
+    }
+
+    const historyWrap = $("#handover-history-wrap");
+    if (hv.history && hv.history.length) {
+      historyWrap.hidden = false;
+      $("#handover-history-tbody").innerHTML = hv.history
+        .map(
+          (h) => `
+        <tr class="row-invalid">
+          <td>${esc(h.from_custodian || "（事件已删除）")}<div class="muted-cell">${esc(h.from_end_time || "—")}</div></td>
+          <td>${esc(h.to_custodian || "（事件已删除）")}<div class="muted-cell">${esc(h.to_start_time || "—")}</div></td>
+          <td>${h.from_name ? esc(h.from_name) + `<div class="muted-cell">${esc(h.from_confirmed_at)}</div>` : '<span class="muted-cell">—</span>'}</td>
+          <td>${h.to_name ? esc(h.to_name) + `<div class="muted-cell">${esc(h.to_confirmed_at)}</div>` : '<span class="muted-cell">—</span>'}</td>
+          <td>${esc(HANDOVER_REASON_LABEL[h.reason] || h.reason_text || h.reason)}</td>
+          <td class="muted-cell">${esc(h.invalidated_at)}</td>
+          <td><button class="link-btn btn-edit" data-ho-detail="${h.id}">查看记录</button></td>
+        </tr>`
+        )
+        .join("");
+    } else {
+      historyWrap.hidden = true;
+    }
+  }
+
+  function statChip(num, label, cls) {
+    return `<span class="ho-stat ${cls}"><b>${num}</b> ${label}</span>`;
+  }
+
+  function renderHandoverRow(item) {
+    const a = item.from_event;
+    const b = item.to_event;
+    const conf = item.confirmation;
+    const badge =
+      item.status === "confirmed"
+        ? `<span class="badge badge-pass">已确认</span>`
+        : item.status === "time_mismatch"
+        ? `<span class="badge badge-fail">时间不一致</span>`
+        : `<span class="badge badge-empty">待确认</span>`;
+
+    const link = item.time_consistent
+      ? `<span class="ho-link ok">结束 = 开始</span>`
+      : `<span class="ho-link bad">结束 ≠ 开始</span>`;
+    const at = a.end_time
+      ? `${esc(a.end_time)}`
+      : `<span class="open-tag">交出方仍在保管（无结束时间）</span>`;
+
+    const sideCell = (name, time, role) =>
+      name
+        ? `<span class="ho-done">${esc(name)}</span><div class="muted-cell">${role} · ${esc(time)}</div>`
+        : `<span class="muted-cell">${role}待确认</span>`;
+    const fromSide = sideCell(conf?.from_name, conf?.from_confirmed_at, "交出");
+    const toSide = sideCell(conf?.to_name, conf?.to_confirmed_at, "接收");
+
+    const invalidHint = item.status === "time_mismatch"
+      ? `<div class="muted-cell ho-hint">两侧已确认，但交出结束时间（${esc(a.end_time || "—")}）与接收开始时间（${esc(b.start_time)}）不一致，请核对后重新确认</div>`
+      : item.status === "pending"
+      ? `<div class="muted-cell ho-hint">${link}${conf ? "，尚有一侧未确认" : "，两侧均未确认"}</div>`
+      : `<div class="muted-cell ho-hint">绑定摘要 <code class="digest">${esc(conf?.digest || "")}</code></div>`;
+
+    return `
+    <tr class="ho-row ho-${item.status}">
+      <td class="col-ord">${item.index}</td>
+      <td>${esc(a.custodian)}<div class="muted-cell">至 ${at}</div>${fromSide}</td>
+      <td>${esc(b.custodian)}<div class="muted-cell">始于 ${esc(b.start_time)}</div>${toSide}</td>
+      <td>${at}</td>
+      <td>${badge}${invalidHint}</td>
+      <td>
+        <button class="link-btn btn-edit" data-ho-from="${a.id}" data-ho-to="${b.id}">
+          ${conf ? "补充 / 重新确认" : "填写确认"}
+        </button>
+        ${conf ? `<button class="link-btn btn-edit" data-ho-detail="${conf.id}">查看记录</button>` : ""}
+      </td>
+    </tr>`;
+  }
+
+  // 打开确认弹窗
+  $("#handover-tbody").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-ho-from]");
+    if (!btn) return;
+    const fromId = Number(btn.dataset.hoFrom);
+    const toId = Number(btn.dataset.hoTo);
+    openHandoverModal(fromId, toId);
+  });
+
+  function openHandoverModal(fromId, toId) {
+    const hv = state.data.handovers;
+    const item = hv.items.find(
+      (i) => i.from_event.id === fromId && i.to_event.id === toId
+    );
+    if (!item) return;
+    state.confirmPair = { fromId, toId };
+    const a = item.from_event;
+    const b = item.to_event;
+    $("#handover-modal-body").innerHTML = `
+      <div class="ho-modal-pair ${item.time_consistent ? "ok" : "bad"}">
+        <div><span class="meta-lbl">交出方</span>${esc(a.custodian)}<div class="muted-cell">结束：${esc(a.end_time || "仍在保管")}</div></div>
+        <div class="ho-arrow">→</div>
+        <div><span class="meta-lbl">接收方</span>${esc(b.custodian)}<div class="muted-cell">开始：${esc(b.start_time)}</div></div>
+      </div>
+      <p class="muted-cell ho-modal-hint">
+        ${item.time_consistent ? "交接时点一致。" : "交出结束时间与接收开始时间不一致，两侧确认后将标记为「时间不一致」。"}
+        确认会绑定两条事件当前的经手人、起止时间与备注摘要；任一事件后续被编辑、删除或不再相邻时，原确认保留为失效记录并需重新确认。
+      </p>`;
+    $("#handover-form").reset();
+    $("#ho-at").value = nowLocalInput();
+    $("#handover-modal").hidden = false;
+    $("#ho-name").focus();
+  }
+
+  const handoverModal = $("#handover-modal");
+  $("#btn-close-handover").addEventListener("click", () => (handoverModal.hidden = true));
+  handoverModal.addEventListener("click", (e) => {
+    if (e.target === handoverModal) handoverModal.hidden = true;
+  });
+
+  $("#handover-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!state.confirmPair) return;
+    const side = document.querySelector('input[name="ho-side"]:checked').value;
+    const payload = {
+      side,
+      confirmer_name: $("#ho-name").value.trim(),
+      confirmed_at: $("#ho-at").value,
+    };
+    if (!payload.confirmer_name || !payload.confirmed_at) {
+      toast("请填写确认人姓名与确认时间", true);
+      return;
+    }
+    try {
+      const { fromId, toId } = state.confirmPair;
+      const result = await api(
+        `/api/samples/${state.currentId}/handovers/confirm?from_event_id=${fromId}&to_event_id=${toId}`,
+        { method: "POST", body: JSON.stringify(payload) }
+      );
+      state.data.handovers = result.view;
+      renderHandovers();
+      const item = result.item;
+      const otherDone =
+        item.status === "confirmed" || item.status === "time_mismatch";
+      toast(
+        otherDone
+          ? item.status === "confirmed"
+            ? "两侧均已确认，交接项已确认 ✓"
+            : "两侧均已确认，但交接时间不一致"
+          : "确认已提交，等待另一侧确认"
+      );
+      if (otherDone) handoverModal.hidden = true;
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  // 交接确认记录详情（含失效历史）
+  async function openHandoverDetail(id) {
+    try {
+      const d = await api(`/api/handovers/${id}`);
+      const snapA = d.from_event_snapshot || {};
+      const snapB = d.to_event_snapshot || {};
+      const badge =
+        d.status === "active"
+          ? `<span class="badge badge-pass">有效</span>`
+          : `<span class="badge badge-fail">已失效</span>`;
+      const invalid =
+        d.status === "invalidated"
+          ? `<div class="revoked-info">⚠ 该确认已于 <b>${esc(d.invalidated_at || "")}</b> 失效：
+             ${esc(d.invalidated_reason_text || "")}。原记录保留备查，不再计入有效状态，需要两侧重新确认。</div>`
+          : "";
+      const sideRow = (title, name, at) => `
+        <tr><th>${title}</th>
+            <td>${name ? esc(name) : '<span class="muted-cell">待确认</span>'}</td>
+            <td class="muted-cell">${at ? esc(at) : "—"}</td></tr>`;
+      $("#handover-detail-body").innerHTML = `
+        <div class="signoff-meta">
+          <div><span class="meta-lbl">状态</span>${badge}</div>
+          <div><span class="meta-lbl">绑定摘要</span><code class="digest">${esc(d.digest.slice(0, 12))}</code></div>
+          <div><span class="meta-lbl">创建时间</span>${esc(d.created_at)}</div>
+          <div><span class="meta-lbl">最近更新</span>${esc(d.updated_at)}</div>
+        </div>
+        <div class="signoff-section">
+          <h4>双方确认</h4>
+          <div class="table-wrap">
+            <table class="event-table">
+              <thead><tr><th>角色</th><th>确认人</th><th>确认时间</th></tr></thead>
+              <tbody>
+                ${sideRow("交出方（事件 #" + d.from_event_id + "）", d.from_name, d.from_confirmed_at)}
+                ${sideRow("接收方（事件 #" + d.to_event_id + "）", d.to_name, d.to_confirmed_at)}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="signoff-section">
+          <h4>确认时绑定的事件关键字段摘要</h4>
+          <div class="table-wrap">
+            <table class="event-table">
+              <thead><tr><th>角色</th><th>经手人</th><th>起始时间</th><th>结束时间</th><th>备注</th></tr></thead>
+              <tbody>
+                <tr><td>交出方</td><td>${esc(snapA.custodian)}</td><td>${esc(snapA.start_time)}</td>
+                    <td>${esc(snapA.end_time || "仍在保管")}</td><td>${esc(snapA.note || "—")}</td></tr>
+                <tr><td>接收方</td><td>${esc(snapB.custodian)}</td><td>${esc(snapB.start_time)}</td>
+                    <td>${esc(snapB.end_time || "仍在保管")}</td><td>${esc(snapB.note || "—")}</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        ${invalid}`;
+      $("#handover-detail-modal").hidden = false;
+    } catch (err) {
+      toast(err.message, true);
+    }
+  }
+
+  $("#handover-tbody").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-ho-detail]");
+    if (btn) openHandoverDetail(Number(btn.dataset.hoDetail));
+  });
+  $("#handover-history-tbody").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-ho-detail]");
+    if (btn) openHandoverDetail(Number(btn.dataset.hoDetail));
+  });
+  const handoverDetailModal = $("#handover-detail-modal");
+  $("#btn-close-handover-detail").addEventListener("click", () => (handoverDetailModal.hidden = true));
+  handoverDetailModal.addEventListener("click", (e) => {
+    if (e.target === handoverDetailModal) handoverDetailModal.hidden = true;
   });
 
   // ---------- 事件增 / 改 / 删 ----------

@@ -366,6 +366,49 @@ input:focus, textarea:focus {
 }
 .btn-danger-solid:hover { background: #b91c1c; }
 
+/* ---------- 双向交接确认 ---------- */
+.handover-stats { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.ho-stat {
+  font-size: 12.5px; padding: 4px 12px; border-radius: 999px;
+  background: #f1f5f9; color: var(--muted); border: 1px solid var(--border);
+}
+.ho-stat b { font-size: 13.5px; }
+.ho-stat.ok { background: var(--ok-bg); color: var(--ok-text); border-color: #b7e4c7; }
+.ho-stat.bad { background: var(--bad-bg); color: var(--bad-text); border-color: #f3b9b3; }
+.ho-stat.warn { background: var(--warn-bg); color: var(--warn-text); border-color: #f3d9a0; }
+.ho-stat.muted { background: #eef1f4; }
+
+.ho-row.ho-confirmed { background: #f6fef9; }
+.ho-row.ho-time_mismatch { background: #fff5f5; }
+.ho-link { font-size: 12px; font-weight: 600; }
+.ho-link.ok { color: var(--ok-text); }
+.ho-link.bad { color: var(--bad-text); }
+.ho-done { font-weight: 600; }
+.ho-hint { margin-top: 3px; }
+tr.row-invalid { background: #fffdf5; }
+.handover-history { margin-top: 16px; }
+.handover-history h4 { margin: 0 0 8px; font-size: 13px; color: var(--warn-text); }
+
+.side-switch { display: flex; gap: 18px; margin-bottom: 12px; }
+.side-opt {
+  flex: 1; display: flex !important; flex-direction: row; align-items: center;
+  gap: 6px; justify-content: center;
+  border: 1px solid var(--border); border-radius: 8px; padding: 9px;
+  cursor: pointer; background: #f8fafc;
+}
+.side-opt:has(input:checked) {
+  border-color: var(--primary); background: #eff6ff; color: var(--primary);
+}
+.handover-modal-body { font-size: 13.5px; margin-bottom: 14px; }
+.ho-modal-pair {
+  display: flex; align-items: center; gap: 12px;
+  background: #f8fafc; border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px 14px; margin-bottom: 10px;
+}
+.ho-modal-pair.bad { border-color: #f3b9b3; background: var(--bad-bg); }
+.ho-modal-pair .ho-arrow { font-size: 20px; color: var(--muted); }
+.ho-modal-hint { margin: 0; line-height: 1.7; }
+
 @media (max-width: 900px) {
   .layout { flex-direction: column; }
   .sidebar { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }

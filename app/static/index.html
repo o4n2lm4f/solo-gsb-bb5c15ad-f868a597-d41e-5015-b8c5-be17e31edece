@@ -102,6 +102,49 @@
           </div>
         </section>
 
+        <!-- 双向交接确认 -->
+        <section class="card">
+          <div class="card-head">
+            <h3>双向交接确认</h3>
+            <span class="head-hint">系统按审计排序为每对相邻事件生成交接项；交出方与接收方分别确认，两侧确认且时间无缝衔接才记为已确认</span>
+          </div>
+          <div id="handover-stats" class="handover-stats"></div>
+          <div class="table-wrap">
+            <table class="event-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>交出方（上一段）</th>
+                  <th>接收方（下一段）</th>
+                  <th>交接时点</th>
+                  <th>状态</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="handover-tbody"></tbody>
+            </table>
+          </div>
+          <div id="handover-history-wrap" class="handover-history" hidden>
+            <h4>失效的历史确认（原记录保留，不再计入有效状态，需重新确认）</h4>
+            <div class="table-wrap">
+              <table class="event-table">
+                <thead>
+                  <tr>
+                    <th>交出方</th>
+                    <th>接收方</th>
+                    <th>交出确认</th>
+                    <th>接收确认</th>
+                    <th>失效原因</th>
+                    <th>失效时间</th>
+                    <th>记录</th>
+                  </tr>
+                </thead>
+                <tbody id="handover-history-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
         <!-- 时间线 -->
         <section class="card">
           <div class="card-head">
@@ -210,6 +253,41 @@
       <div id="revoked-info" class="revoked-info" hidden></div>
       <div class="form-actions">
         <button type="button" id="btn-close-signoff" class="btn btn-ghost">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 双向交接确认弹窗 -->
+  <div id="handover-modal" class="modal-mask" hidden>
+    <div class="modal">
+      <h3>双向交接确认</h3>
+      <div id="handover-modal-body" class="handover-modal-body"></div>
+      <form id="handover-form">
+        <div class="side-switch">
+          <label class="side-opt"><input type="radio" name="ho-side" value="from" checked /> 交出方确认</label>
+          <label class="side-opt"><input type="radio" name="ho-side" value="to" /> 接收方确认</label>
+        </div>
+        <label>确认人姓名
+          <input type="text" id="ho-name" maxlength="64" placeholder="如：李四（运输组）" required />
+        </label>
+        <label>确认时间
+          <input type="datetime-local" id="ho-at" step="1" required />
+        </label>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">提交确认</button>
+          <button type="button" id="btn-close-handover" class="btn btn-ghost">关闭</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 交接确认记录详情弹窗 -->
+  <div id="handover-detail-modal" class="modal-mask" hidden>
+    <div class="modal modal-wide">
+      <h3>交接确认记录详情</h3>
+      <div id="handover-detail-body" class="signoff-detail"></div>
+      <div class="form-actions">
+        <button type="button" id="btn-close-handover-detail" class="btn btn-ghost">关闭</button>
       </div>
     </div>
   </div>

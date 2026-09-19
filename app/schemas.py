@@ -107,3 +107,27 @@ class SignoffRevoke(BaseModel):
         if not v:
             raise ValueError("撤销原因不能为空")
         return v
+
+
+class HandoverConfirm(BaseModel):
+    """双向交接确认：交出方或接收方填写姓名与确认时间。"""
+
+    side: str = Field(..., pattern="^(from|to)$")
+    confirmer_name: str = Field(..., min_length=1, max_length=64)
+    confirmed_at: str
+
+    @field_validator("confirmer_name")
+    @classmethod
+    def _strip_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("确认人姓名不能为空")
+        return v
+
+    @field_validator("confirmed_at")
+    @classmethod
+    def _norm_confirmed_at(cls, v: str) -> str:
+        normalized = _normalize_time(v, "确认时间")
+        if normalized is None:
+            raise ValueError("确认时间不能为空")
+        return normalized
